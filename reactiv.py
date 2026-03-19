@@ -7,6 +7,7 @@ from rasterio.crs import CRS
 from rasterio.warp import transform_bounds
 from datetime import datetime
 from PIL import Image
+import rasterio.windows
 
 
 def hsv_to_rgb(h, s, v):
@@ -102,7 +103,7 @@ def run_reactiv(input_data: dict, data_folder: str = None) -> dict:
             continue
 
         for f in files:
-            if f.endswith(".tif"):
+            if f.endswith(".tif") and "preview" not in f.lower():
                 tif_files.append((os.path.join(root_dir, f), date))
 
     print(f"Found {len(tif_files)} Capella .tif files in date range")
@@ -150,6 +151,14 @@ def run_reactiv(input_data: dict, data_folder: str = None) -> dict:
 
             window = from_bounds(*native_bounds, transform=src.transform)
 
+            # Klipp window till filens faktiska gränser
+            file_window = rasterio.windows.Window(0, 0, src.width, src.height)
+            window = window.intersection(file_window)
+
+            if window.width <= 0 or window.height <= 0:
+                print(f"  Window outside file bounds: {filename}")
+                continue
+
             win_h = max(1, int(round(window.height)))
             win_w = max(1, int(round(window.width)))
 
@@ -158,17 +167,29 @@ def run_reactiv(input_data: dict, data_folder: str = None) -> dict:
             out_h = max(1, int(win_h * scale))
             out_w = max(1, int(win_w * scale))
 
-            arr = src.read(
-                1,
-                window=window,
-                out_shape=(out_h, out_w),
-                resampling=rasterio.enums.Resampling.average
-            ).astype(np.float32)
+            try:
+                arr = src.read(
+                    1,
+                    window=window,
+                    out_shape=(out_h, out_w),
+                    resampling=rasterio.enums.Resampling.average
+                ).astype(np.float32)
+            except Exception as e:
+                print(f" Skipping corrupt file: {filename} ({e})")
+                continue
 
+            # Capella uint16 DN -> linjär intensitet
             nodata = src.nodata
             if nodata is not None:
                 arr[arr == nodata] = np.nan
             arr[arr < -1e6] = np.nan
+            arr[arr == 0] = np.nan  # Capella använder 0 som nodata
+
+            valid = arr[~np.isnan(arr)]
+            if valid.size > 0:
+                p99_dn = np.percentile(valid, 99)
+                if p99_dn > 0:
+                    arr = (arr / p99_dn) ** 2  # DN amplitud -> normaliserad linjär intensitet
 
             if arr.size == 0 or np.all(np.isnan(arr)):
                 print(f"  Empty after clip: {filename}")
@@ -255,11 +276,14 @@ def run_reactiv(input_data: dict, data_folder: str = None) -> dict:
     # Step 6: Value channel — imax clamp(0,1) som GEE
     # Capella är i linjär amplitud efter sqrt, kan överstiga 1 för urban
     # Normalisera med p99 för att matcha GEE's GRD_FLOAT dynamik
+    # Byt ut Step 6 mot detta:
     valid_imax = imax[~no_data_mask]
-    p99 = np.percentile(valid_imax, 99) if valid_imax.size > 0 else 1.0
-    p99 = max(p99, 1e-6)
-    v   = np.clip(imax / p99, 0.0, 1.0)
-
+    if valid_imax.size > 0:
+        p5  = np.percentile(valid_imax, 5)
+        p95 = np.percentile(valid_imax, 95)
+        v = np.clip((imax - p5) / (p95 - p5 + 1e-6), 0.0, 1.0)
+    else:
+        v = np.clip(imax, 0.0, 1.0)
     # -------------------------------------------------
     # HSV → RGB  — matchar GEE's .hsvToRgb() + gamma=2
     # H = days * croppalet
