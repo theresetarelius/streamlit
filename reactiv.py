@@ -334,5 +334,8 @@ def run_reactiv(input_data: dict, data_folder: str = None) -> dict:
     return {
         "rgb":    rgb_hwc,
         "extent": extent_out,
-        "no_data_mask": no_data_mask.tolist()
+        "no_data_mask": no_data_mask.tolist(),
+        "amplitude": amplitude,
+        "dates": [d.isoformat() for d in dates],
+        "stack_extent": extent_out
     }
