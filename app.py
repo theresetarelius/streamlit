@@ -62,8 +62,13 @@ if "reactiv_result" in st.session_state:
         ext     = result["extent"]
 
         img_uint8 = (np.clip(rgb_hwc, 0, 1) * 255).astype(np.uint8)
-        pil_img   = Image.fromarray(img_uint8)
-        buf       = io.BytesIO()
+
+        no_data_mask = np.array(result["no_data_mask"])
+        alpha = np.where(no_data_mask, 0, 255).astype(np.uint8)
+
+        img_rgba = np.dstack([img_uint8, alpha])
+        pil_img  = Image.fromarray(img_rgba, mode="RGBA")
+        buf      = io.BytesIO()
         pil_img.save(buf, format="PNG")
         img_b64 = base64.b64encode(buf.getvalue()).decode()
 
