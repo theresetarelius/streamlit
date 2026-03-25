@@ -7,6 +7,9 @@ from PIL import Image
 import io
 import base64
 import plotly.graph_objects as go
+import os
+from reactiv import run_reactiv
+from reactiv_evaluation import evaluate_reactiv
 
 st.set_page_config(layout="wide", page_title="REACTIV Detection")
 
@@ -37,6 +40,12 @@ with st.sidebar:
         result = st.session_state["reactiv_result"]
         if "error" not in result:
             st.success("Resultat klart!")
+
+    
+    st.markdown("---")
+    st.subheader("Evaluation")
+    gt_path = st.text_input("Ground truth .tif", value="")
+    evaluate_btn = st.button("📊 Run evaluation", use_container_width=True)
 
 # -------------------------------------------------
 # LEGEND
@@ -88,9 +97,10 @@ if "reactiv_result" in st.session_state and "error" not in st.session_state["rea
 st.subheader("Map")
 st.caption("Zoom to your area of choice  and press Run to run REACTIV")
 
+
 m = folium.Map(
-    location=[19.42, -155.28],
-    zoom_start=11,
+    location=[39, -100],
+    zoom_start=5,
     tiles=None
 )
 
@@ -129,17 +139,30 @@ if "reactiv_result" in st.session_state:
 
 folium.LayerControl().add_to(m)
 
-map_data = st_folium(m, width="100%", height=600, returned_objects=["bounds", "last_clicked"])
+map_data = st_folium(
+    m,
+    width="100%",
+    height=600,
+    returned_objects=["bounds", "last_clicked", "zoom"],
+    key="main_map",
+)
 
 # Spara bbox
 if map_data and map_data.get("bounds"):
     b = map_data["bounds"]
-    st.session_state["bbox"] = [
-        b["_southWest"]["lng"],
-        b["_southWest"]["lat"],
-        b["_northEast"]["lng"],
-        b["_northEast"]["lat"],
-    ]
+    sw = b.get("_southWest")
+    ne = b.get("_northEast")
+    if sw and ne and sw.get("lat") is not None and ne.get("lat") is not None:
+        st.session_state["bbox"] = [
+            sw["lng"], sw["lat"], ne["lng"], ne["lat"],
+        ]
+        st.session_state["map_center"] = [
+            (sw["lat"] + ne["lat"]) / 2,
+            (sw["lng"] + ne["lng"]) / 2,
+        ]
+
+if map_data and map_data.get("zoom"):
+    st.session_state["map_zoom"] = map_data["zoom"]
 
 # -------------------------------------------------
 # TIDSPROFIL VID KLICK
@@ -226,5 +249,37 @@ if process_btn:
         if "error" in result:
             st.error(f"Fel: {result['error']}")
         else:
-            st.success("DOne! The results have been added to the map.")
-            st.rerun()
+            st.success("Done! The results have been added to the map.")
+
+
+if evaluate_btn:
+    if "reactiv_result" not in st.session_state or "error" in st.session_state["reactiv_result"]:
+        st.warning("Kör REACTIV först innan du utvärderar.")
+    elif not gt_path or not os.path.exists(gt_path):
+        st.error("Ange en giltig sökväg till ground truth-filen.")
+    else:
+        from reactiv_evaluation import evaluate_reactiv
+        import os
+
+        with st.spinner("Utvärderar..."):
+            results = evaluate_reactiv(
+                reactiv_output=st.session_state["reactiv_result"],
+                gt_path=gt_path,
+                save_path="overlay_result.png"
+            )
+
+        st.success("Utvärdering klar!")
+
+        # Visa tabell
+        import pandas as pd
+        df = pd.DataFrame(results)
+        st.dataframe(df.style.format({
+            "threshold": "{:.2f}",
+            "precision": "{:.3f}",
+            "recall":    "{:.3f}",
+            "f1":        "{:.3f}"
+        }), use_container_width=True)
+
+        # Visa overlay-bild
+        if os.path.exists("overlay_result.png"):
+            st.image("overlay_result.png", caption="Overlay: Grön=TP, Röd=FP, Blå=FN")
