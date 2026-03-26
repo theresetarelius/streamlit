@@ -27,12 +27,25 @@ def evaluate_reactiv(reactiv_output: dict, gt_path: str, thresholds=None, save_p
 
     with rasterio.open(gt_path) as gt_src:
         dst_transform = rasterio.transform.from_bounds(west, south, east, north, out_w, out_h)
-        src_data = gt_src.read(1).astype(np.float32)
+        
+        src_data = gt_src.read(
+            1,
+            out_shape=(out_h, out_w),
+            resampling=Resampling.nearest
+        ).astype(np.float32)
+        
+        # Sätt nodata-värden till 0
+        src_data[src_data < -1e10] = 0.0
+        
+        scaled_transform = rasterio.transform.from_bounds(
+            *gt_src.bounds, out_w, out_h
+        )
+        
         gt_reprojected = np.zeros((out_h, out_w), dtype=np.float32)
         reproject(
             source=src_data,
             destination=gt_reprojected,
-            src_transform=gt_src.transform,
+            src_transform=scaled_transform,
             src_crs=gt_src.crs,
             dst_transform=dst_transform,
             dst_crs=wgs84,
@@ -40,6 +53,7 @@ def evaluate_reactiv(reactiv_output: dict, gt_path: str, thresholds=None, save_p
         )
 
     gt_binary = (gt_reprojected > 0.5).astype(np.uint8)
+    print(f"GT binary: {gt_binary.sum()} förändringspixlar av {gt_binary.size} totalt")
 
     results = []
     for thr in thresholds:
@@ -54,7 +68,7 @@ def evaluate_reactiv(reactiv_output: dict, gt_path: str, thresholds=None, save_p
         results.append({"threshold": thr, "TP": TP, "FP": FP, "TN": TN, "FN": FN,
                         "precision": precision, "recall": recall, "f1": f1})
 
-    mid_thr  = thresholds[len(thresholds) // 2]
+    mid_thr  = 0.1
     pred_mid = (saturation >= mid_thr).astype(np.uint8)
     overlay  = rgb.copy()
     tp_mask  = (pred_mid == 1) & (gt_binary == 1)
@@ -72,7 +86,7 @@ def evaluate_reactiv(reactiv_output: dict, gt_path: str, thresholds=None, save_p
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     axes[0].imshow(rgb);      axes[0].set_title("REACTIV RGB output"); axes[0].axis("off")
     axes[1].imshow(gt_binary, cmap="gray"); axes[1].set_title("Ground truth mask"); axes[1].axis("off")
-    axes[2].imshow(overlay);  axes[2].set_title(f"Overlay (tröskel={mid_thr:.2f})"); axes[2].axis("off")
+    axes[2].imshow(overlay);  axes[2].set_title(f"Overlay"); axes[2].axis("off")
     axes[2].legend(handles=[
         mpatches.Patch(color="green", label="TP"),
         mpatches.Patch(color="red",   label="FP"),

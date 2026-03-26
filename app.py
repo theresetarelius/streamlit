@@ -40,12 +40,13 @@ with st.sidebar:
         result = st.session_state["reactiv_result"]
         if "error" not in result:
             st.success("Resultat klart!")
+            if st.button("💾 Save result to disk"):
+                np.save("/opt/saab/mex/streamlit/results/reactiv_result.npy",
+                        st.session_state["reactiv_result"])
+                st.success("Saved as reactiv_result.npy")
+
 
     
-    st.markdown("---")
-    st.subheader("Evaluation")
-    gt_path = st.text_input("Ground truth .tif", value="")
-    evaluate_btn = st.button("📊 Run evaluation", use_container_width=True)
 
 # -------------------------------------------------
 # LEGEND
@@ -252,34 +253,3 @@ if process_btn:
             st.success("Done! The results have been added to the map.")
 
 
-if evaluate_btn:
-    if "reactiv_result" not in st.session_state or "error" in st.session_state["reactiv_result"]:
-        st.warning("Kör REACTIV först innan du utvärderar.")
-    elif not gt_path or not os.path.exists(gt_path):
-        st.error("Ange en giltig sökväg till ground truth-filen.")
-    else:
-        from reactiv_evaluation import evaluate_reactiv
-        import os
-
-        with st.spinner("Utvärderar..."):
-            results = evaluate_reactiv(
-                reactiv_output=st.session_state["reactiv_result"],
-                gt_path=gt_path,
-                save_path="overlay_result.png"
-            )
-
-        st.success("Utvärdering klar!")
-
-        # Visa tabell
-        import pandas as pd
-        df = pd.DataFrame(results)
-        st.dataframe(df.style.format({
-            "threshold": "{:.2f}",
-            "precision": "{:.3f}",
-            "recall":    "{:.3f}",
-            "f1":        "{:.3f}"
-        }), use_container_width=True)
-
-        # Visa overlay-bild
-        if os.path.exists("overlay_result.png"):
-            st.image("overlay_result.png", caption="Overlay: Grön=TP, Röd=FP, Blå=FN")
