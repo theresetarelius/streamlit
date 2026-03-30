@@ -8,7 +8,7 @@ import io
 import base64
 import plotly.graph_objects as go
 import os
-from reactiv import run_reactiv
+from reactiv_multi import run_reactiv_multiscale as run_reactiv
 from reactiv_evaluation import evaluate_reactiv
 
 st.set_page_config(layout="wide", page_title="REACTIV Detection")
