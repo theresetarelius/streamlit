@@ -53,15 +53,22 @@ def evaluate_reactiv(reactiv_output: dict, gt_path: str, thresholds=None, save_p
         )
 
     gt_binary = (gt_reprojected > 0.5).astype(np.uint8)
+    #gt_binary = (gt_reprojected >= 2).astype(np.uint8)
+    #valid_mask = gt_reprojected > 0 #Ny för byggnader
     print(f"GT binary: {gt_binary.sum()} förändringspixlar av {gt_binary.size} totalt")
 
     results = []
     for thr in thresholds:
         pred = (saturation >= thr).astype(np.uint8)
+        #pred = pred * valid_mask #Ny för byggnader
         TP = int(np.sum((pred == 1) & (gt_binary == 1)))
         FP = int(np.sum((pred == 1) & (gt_binary == 0)))
         TN = int(np.sum((pred == 0) & (gt_binary == 0)))
         FN = int(np.sum((pred == 0) & (gt_binary == 1)))
+        #TP = np.sum((pred == 1) & (gt_binary == 1) & valid_mask)
+        #FP = np.sum((pred == 1) & (gt_binary == 0) & valid_mask)
+        #TN = np.sum((pred == 0) & (gt_binary == 0) & valid_mask)
+        #FN = np.sum((pred == 0) & (gt_binary == 1) & valid_mask)
         precision = TP / (TP + FP + 1e-8)
         recall    = TP / (TP + FN + 1e-8)
         f1        = 2 * precision * recall / (precision + recall + 1e-8)
@@ -74,6 +81,9 @@ def evaluate_reactiv(reactiv_output: dict, gt_path: str, thresholds=None, save_p
     tp_mask  = (pred_mid == 1) & (gt_binary == 1)
     fp_mask  = (pred_mid == 1) & (gt_binary == 0)
     fn_mask  = (pred_mid == 0) & (gt_binary == 1)
+    #tp_mask  = (pred_mid == 1) & (gt_binary == 1) & valid_mask
+    #fp_mask  = (pred_mid == 1) & (gt_binary == 0) & valid_mask
+    #fn_mask  = (pred_mid == 0) & (gt_binary == 1) & valid_mask
 
     alpha = 0.5
     for c, val in zip(range(3), [0.0, 1.0, 0.0]):
