@@ -100,9 +100,9 @@ def reactiv_on_stack(stack, dates, start, end):
 
     sizepile  = np.sum(~np.isnan(amplitude), axis=0).astype(np.float32)
     sizepile  = np.where(sizepile < 1, 1.0, sizepile)
-    mu        = 0.5
+    mu        = 0.2286
     stdmu     = 0.1616 / np.sqrt(sizepile)
-    magicnorm = np.clip((magic - mu) / (stdmu * 10.0), 0.0, 1.0)
+    magicnorm = np.clip((magic - mu) / (stdmu * 3.0), 0.0, 1.0)
 
     valid_imax = imax[~no_data_mask]
     if valid_imax.size > 0:
@@ -182,28 +182,33 @@ def reactiv_multiscale(stack, dates, start, end, scales=(1, 20, 70),
         amplitude     (N, H, W)
         intensity     (N, H, W)
     """
-    print("  Running REACTIV at fine scale (no smoothing)...")
+    print("  Running REACTIV at fine scale...")
     rgb_fine, no_data_mask, magicnorm_fine, days_fine, v_fine = reactiv_on_stack(
         stack, dates, start, end
     )
 
     amplitude_fine = np.where(
-        np.isnan(stack) | (stack <= 0),
-        np.nan,
-        np.sqrt(stack)
+        np.isnan(stack) | (stack <= 0), np.nan, np.sqrt(stack)
     )
 
-    print(f"  Running REACTIV at coarse scale (downsample_factor={downsample_factor})...")
-    magicnorm_coarse, _ = _compute_coarse_score(
-        stack, dates, start, end,
-        downsample_factor=downsample_factor
-    )
+    N, H, W = stack.shape
 
-    # Gate: en pixel måste vara signifikant på BÅDA skalorna
-    # Annars sätts scoren till noll → ingen färg
-    COARSE_THRESHOLD = 0.3  # justera 0.2–0.5 efter smak
-    gate = (magicnorm_coarse >= COARSE_THRESHOLD).astype(np.float32)
-    magicnorm_ms = magicnorm_fine * gate
+    # Lätt smoothing för att ta bort enstaka speckle-pixlar
+    # men behåll signalens styrka
+    SMOOTH_KERNEL = 3
+    magicnorm_smooth = uniform_filter(magicnorm_fine, size=SMOOTH_KERNEL)
+
+    # Ingen gate-multiplikation – behåll fulla värden
+    magicnorm_ms = magicnorm_smooth
+
+    print(f"  N={N} images")
+    print(f"  magicnorm_fine:   min={magicnorm_fine.min():.3f}, "
+          f"mean={magicnorm_fine.mean():.3f}, max={magicnorm_fine.max():.3f}")
+    print(f"  magicnorm_ms:     min={magicnorm_ms.min():.3f}, "
+          f"mean={magicnorm_ms.mean():.3f}, max={magicnorm_ms.max():.3f}")
+    print(f"  pct>0.1: {(magicnorm_ms>0.1).mean()*100:.1f}%  "
+          f"pct>0.2: {(magicnorm_ms>0.2).mean()*100:.1f}%  "
+          f"pct>0.3: {(magicnorm_ms>0.3).mean()*100:.1f}%")
 
     croppalet = 0.6
     h_ch = np.clip(np.nan_to_num(days_fine * croppalet), 0.0, 1.0)
@@ -223,6 +228,8 @@ def reactiv_multiscale(stack, dates, start, end, scales=(1, 20, 70),
     rgb = smooth_rgb
 
     return rgb, no_data_mask, magicnorm_ms, amplitude_fine, stack.copy()
+    
+    
 
 
 def run_reactiv_multiscale(input_data: dict, data_folder: str = None,
@@ -273,6 +280,8 @@ def run_reactiv_multiscale(input_data: dict, data_folder: str = None,
         return {"error": "No Capella GEO files found in data folder for the given date range"}
 
     tif_files = sorted(tif_files, key=lambda x: x[1])
+
+    
 
     # -------------------------------------------------
     # DETERMINE OUTPUT GRID
