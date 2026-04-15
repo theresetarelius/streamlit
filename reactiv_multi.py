@@ -9,6 +9,23 @@ from rasterio.warp import transform_bounds
 from datetime import datetime
 from scipy.ndimage import uniform_filter
 
+try:
+    from skimage.transform import resize as sk_resize
+    _HAS_SKIMAGE = True
+except ImportError:
+    _HAS_SKIMAGE = False
+
+
+def _resize(arr, shape):
+    """Resize a 2D array to shape (H, W). Falls back to numpy if skimage unavailable."""
+    if _HAS_SKIMAGE:
+        return sk_resize(arr, shape, order=1, anti_aliasing=True, preserve_range=True).astype(np.float32)
+    H, W = shape
+    h, w = arr.shape
+    row_idx = (np.arange(H) * h / H).astype(int)
+    col_idx = (np.arange(W) * w / W).astype(int)
+    return arr[np.ix_(row_idx, col_idx)].astype(np.float32)
+
 
 def hsv_to_rgb(h, s, v):
     """Vectorized HSV -> RGB, matching GEE's hsvToRgb()."""
@@ -83,7 +100,7 @@ def reactiv_on_stack(stack, dates, start, end):
 
     sizepile  = np.sum(~np.isnan(amplitude), axis=0).astype(np.float32)
     sizepile  = np.where(sizepile < 1, 1.0, sizepile)
-    mu        = 0.2286
+    mu        = 0.5
     stdmu     = 0.1616 / np.sqrt(sizepile)
     magicnorm = np.clip((magic - mu) / (stdmu * 10.0), 0.0, 1.0)
 
@@ -109,66 +126,85 @@ def reactiv_on_stack(stack, dates, start, end):
     return rgb, no_data_mask, magicnorm, days, v
 
 
-def reactiv_multiscale(stack, dates, start, end, scales=(1, 3, 7)):
+def _compute_coarse_score(stack, dates, start, end, downsample_factor=32):
     """
-    Run REACTIV at multiple spatial scales and combine results.
+    Kör REACTIV på en nedsamplad version av stacken och skalar upp
+    magicnorm-scoren till originalupplösning.
+    """
+    N, H, W = stack.shape
+    H_small = max(H // downsample_factor, 4)
+    W_small = max(W // downsample_factor, 4)
 
-    At each scale, the input stack is spatially smoothed with a uniform filter
-    of size `scale`. The magicnorm (saturation proxy / change score) from each
-    scale is then combined using the MINIMUM across scales — meaning a pixel is
-    only considered changed if it shows change at ALL scales. This suppresses
-    speckle noise and small transient movers that only appear at fine scales.
+    small_stack = np.zeros((N, H_small, W_small), dtype=np.float32)
+    for i in range(N):
+        img = stack[i]
+        nan_mask = np.isnan(img)
+        filled = np.where(nan_mask, 0.0, img)
+        weight = np.where(nan_mask, 0.0, 1.0)
+        filled_r = _resize(filled, (H_small, W_small))
+        weight_r = _resize(weight, (H_small, W_small))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            result = np.where(weight_r > 0.1, filled_r / weight_r, np.nan)
+        small_stack[i] = result
 
-    The hue (timing) and brightness (amplitude) channels are taken from the
-    finest scale to preserve temporal and radiometric detail.
+    _, _, magicnorm_small, days_small, _ = reactiv_on_stack(
+        small_stack, dates, start, end
+    )
+
+    magicnorm_up = _resize(magicnorm_small, (H, W))
+    days_up      = _resize(days_small,      (H, W))
+
+    return magicnorm_up, days_up
+
+
+def reactiv_multiscale(stack, dates, start, end, scales=(1, 20, 70),
+                       downsample_factor=32):
+    """
+    Kör REACTIV med en kombination av fin-skala rendering och
+    grov-skala ändringsdetektering via nedsampling.
+
+    Strategi:
+    - Fin skala (scale=1):     ger skarp hue (timing) och brightness (amplitud)
+    - Grov skala (nedsamplad): ger robust magicnorm (ändringscore) utan speckle
+    - Kombinering: minimum av fin och grov score
 
     Args:
-        stack:  (N, H, W) float32 array of linear intensity values
-        dates:  list of datetime objects, length N
-        start:  datetime, start of time window
-        end:    datetime, end of time window
-        scales: tuple of odd integers — spatial smoothing kernel sizes.
-                1 = no smoothing (original resolution),
-                3 = 3x3 neighbourhood average, etc.
+        stack:             (N, H, W) float32
+        dates:             lista av datetime, längd N
+        start, end:        datetime
+        scales:            behålls för bakåtkompatibilitet men används ej längre
+        downsample_factor: hur mycket stacken krympas för grov analys (standard 8)
 
     Returns:
-        rgb          (3, H, W) — combined multi-scale REACTIV colorization
-        no_data_mask (H, W)    — True where all images are NaN
-        magicnorm_ms (H, W)    — combined change score (min across scales)
-        amplitude    (N, H, W) — amplitude stack at finest scale
-        intensity    (N, H, W) — original intensity stack
+        rgb           (3, H, W)
+        no_data_mask  (H, W)
+        magicnorm_ms  (H, W)
+        amplitude     (N, H, W)
+        intensity     (N, H, W)
     """
-    scales = sorted(scales)  # finest first
+    print("  Running REACTIV at fine scale (no smoothing)...")
+    rgb_fine, no_data_mask, magicnorm_fine, days_fine, v_fine = reactiv_on_stack(
+        stack, dates, start, end
+    )
 
-    magicnorm_per_scale = []
-    days_fine   = None
-    v_fine      = None
-    no_data_mask = None
-    amplitude_fine = None
+    amplitude_fine = np.where(
+        np.isnan(stack) | (stack <= 0),
+        np.nan,
+        np.sqrt(stack)
+    )
 
-    for scale in scales:
-        print(f"  Running REACTIV at scale={scale}...")
-        smoothed = smooth_stack(stack, kernel_size=scale)
-        rgb_s, ndm_s, magicnorm_s, days_s, v_s = reactiv_on_stack(
-            smoothed, dates, start, end
-        )
-        magicnorm_per_scale.append(magicnorm_s)
+    print(f"  Running REACTIV at coarse scale (downsample_factor={downsample_factor})...")
+    magicnorm_coarse, _ = _compute_coarse_score(
+        stack, dates, start, end,
+        downsample_factor=downsample_factor
+    )
 
-        if scale == scales[0]:  # finest scale
-            days_fine    = days_s
-            v_fine       = v_s
-            no_data_mask = ndm_s
-            amplitude_fine = np.where(
-                np.isnan(smoothed) | (smoothed <= 0),
-                np.nan,
-                np.sqrt(smoothed)
-            )
+    # Gate: en pixel måste vara signifikant på BÅDA skalorna
+    # Annars sätts scoren till noll → ingen färg
+    COARSE_THRESHOLD = 0.3  # justera 0.2–0.5 efter smak
+    gate = (magicnorm_coarse >= COARSE_THRESHOLD).astype(np.float32)
+    magicnorm_ms = magicnorm_fine * gate
 
-    # Combine: take minimum magicnorm across scales
-    # A pixel must show change at ALL scales to be considered a true change
-    magicnorm_ms = np.min(np.stack(magicnorm_per_scale[1:], axis=0), axis=0)
-
-    # Rebuild RGB using fine-scale hue/brightness but multi-scale saturation
     croppalet = 0.6
     h_ch = np.clip(np.nan_to_num(days_fine * croppalet), 0.0, 1.0)
     s_ch = np.clip(np.nan_to_num(magicnorm_ms),          0.0, 1.0)
@@ -180,32 +216,20 @@ def reactiv_multiscale(stack, dates, start, end, scales=(1, 3, 7)):
     for c in range(3):
         rgb[c][no_data_mask] = 0.0
 
-    intensity = stack.copy()
-
-    # Smooth final RGB to reduce graininess
-    from scipy.ndimage import uniform_filter
     smooth_rgb = np.zeros_like(rgb)
     for c in range(3):
         smooth_rgb[c] = uniform_filter(rgb[c], size=3)
         smooth_rgb[c][no_data_mask] = 0.0
     rgb = smooth_rgb
 
-    return rgb, no_data_mask, magicnorm_ms, amplitude_fine, intensity
+    return rgb, no_data_mask, magicnorm_ms, amplitude_fine, stack.copy()
 
 
 def run_reactiv_multiscale(input_data: dict, data_folder: str = None,
-                           scales: tuple = (1, 15, 31)) -> dict:
+                           scales: tuple = (10, 50, 100)) -> dict:
     """
     Run the multi-scale REACTIV algorithm on Capella GEO GeoTIFF files.
-
-    Args:
-        input_data:  dict with keys startDate, endDate, bbox
-        data_folder: path to folder containing Capella GeoTIFF files
-        scales:      spatial smoothing scales — e.g. (1, 3, 7) means
-                     run at native resolution, 3x3, and 7x7 smoothing.
-                     Only changes visible at ALL scales are retained.
     """
-
     if data_folder is None:
         data_folder = "/opt/saab/mex/streamlit/data"
 
@@ -219,7 +243,6 @@ def run_reactiv_multiscale(input_data: dict, data_folder: str = None,
 
     print(f"Date range: {start} → {end}")
     print(f"BBox: {west:.3f},{south:.3f},{east:.3f},{north:.3f}")
-    print(f"Scales: {scales}")
 
     # -------------------------------------------------
     # FIND CAPELLA GEO FILES
@@ -273,7 +296,6 @@ def run_reactiv_multiscale(input_data: dict, data_folder: str = None,
     n_tiles_y = int(np.ceil(out_h / TILE_SIZE))
     print(f"Tiles: {n_tiles_x}x{n_tiles_y} = {n_tiles_x * n_tiles_y} total")
 
-    # Result arrays
     rgb_full    = np.zeros((3, out_h, out_w), dtype=np.float32)
     nodata_full = np.ones((out_h, out_w), dtype=bool)
     amp_full    = np.full((len(tif_files), out_h, out_w), np.nan, dtype=np.float32)
@@ -383,9 +405,8 @@ def run_reactiv_multiscale(input_data: dict, data_folder: str = None,
                 file_indices.append(file_idx)
                 dates_for_stack.append(tif_files[file_idx][1])
 
-            # Run multi-scale REACTIV on this tile
             rgb_tile, nodata_tile, score_tile, amp_tile, int_tile = reactiv_multiscale(
-                stack, dates_for_stack, start, end, scales=scales
+                stack, dates_for_stack, start, end
             )
 
             rgb_full[:, py0:py1, px0:px1]  = rgb_tile
@@ -412,11 +433,11 @@ def run_reactiv_multiscale(input_data: dict, data_folder: str = None,
     print(f"Output image: {out_w}x{out_h} pixels, {len(dates_used)} dates")
 
     return {
-        "rgb":            rgb_hwc,
-        "extent":         extent_out,
-        "no_data_mask":   nodata_full,
-        "amplitude":      amp_full,
-        "intensity":      int_full,
-        "dates":          [d.isoformat() for d in dates_used],
-        "multiscale_score": ms_score,  # extra: combined change score for evaluation
+        "rgb":              rgb_hwc,
+        "extent":           extent_out,
+        "no_data_mask":     nodata_full,
+        "amplitude":        amp_full,
+        "intensity":        int_full,
+        "dates":            [d.isoformat() for d in dates_used],
+        "multiscale_score": ms_score,
     }
