@@ -235,7 +235,7 @@ if process_btn:
     elif start_date >= end_date:
         st.error("Ogiltigt datumintervall.")
     else:
-        from reactiv import run_reactiv
+        from reactiv_multi import run_reactiv_multiscale
         bbox = st.session_state["bbox"]
         with st.spinner("Kör REACTIV-algoritmen..."):
             input_data = {
