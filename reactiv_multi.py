@@ -100,9 +100,9 @@ def reactiv_on_stack(stack, dates, start, end):
 
     sizepile  = np.sum(~np.isnan(amplitude), axis=0).astype(np.float32)
     sizepile  = np.where(sizepile < 1, 1.0, sizepile)
-    mu        = 0.2286
+    mu        = 0.48
     stdmu     = 0.1616 / np.sqrt(sizepile)
-    magicnorm = np.clip((magic - mu) / (stdmu * 3.0), 0.0, 1.0)
+    magicnorm = np.clip((magic - mu) / (stdmu * 4.0), 0.0, 1.0)
 
     valid_imax = imax[~no_data_mask]
     if valid_imax.size > 0:
@@ -157,31 +157,9 @@ def _compute_coarse_score(stack, dates, start, end, downsample_factor=32):
     return magicnorm_up, days_up
 
 
-def reactiv_multiscale(stack, dates, start, end, scales=(1, 20, 70),
+def reactiv_multiscale(stack, dates, start, end, scales=(1, 10, 50),
                        downsample_factor=32):
-    """
-    Kör REACTIV med en kombination av fin-skala rendering och
-    grov-skala ändringsdetektering via nedsampling.
 
-    Strategi:
-    - Fin skala (scale=1):     ger skarp hue (timing) och brightness (amplitud)
-    - Grov skala (nedsamplad): ger robust magicnorm (ändringscore) utan speckle
-    - Kombinering: minimum av fin och grov score
-
-    Args:
-        stack:             (N, H, W) float32
-        dates:             lista av datetime, längd N
-        start, end:        datetime
-        scales:            behålls för bakåtkompatibilitet men används ej längre
-        downsample_factor: hur mycket stacken krympas för grov analys (standard 8)
-
-    Returns:
-        rgb           (3, H, W)
-        no_data_mask  (H, W)
-        magicnorm_ms  (H, W)
-        amplitude     (N, H, W)
-        intensity     (N, H, W)
-    """
     print("  Running REACTIV at fine scale...")
     rgb_fine, no_data_mask, magicnorm_fine, days_fine, v_fine = reactiv_on_stack(
         stack, dates, start, end
@@ -193,17 +171,19 @@ def reactiv_multiscale(stack, dates, start, end, scales=(1, 20, 70),
 
     N, H, W = stack.shape
 
-    # Lätt smoothing för att ta bort enstaka speckle-pixlar
-    # men behåll signalens styrka
-    SMOOTH_KERNEL = 3
-    magicnorm_smooth = uniform_filter(magicnorm_fine, size=SMOOTH_KERNEL)
+    print("  Running REACTIV at coarse scale...")
+    magicnorm_coarse, _ = _compute_coarse_score(
+        stack, dates, start, end, downsample_factor=downsample_factor
+    )
 
-    # Ingen gate-multiplikation – behåll fulla värden
-    magicnorm_ms = magicnorm_smooth
+    # Kombinera fin och grov skala med minimum
+    magicnorm_ms = np.minimum(magicnorm_fine, magicnorm_coarse)
 
     print(f"  N={N} images")
     print(f"  magicnorm_fine:   min={magicnorm_fine.min():.3f}, "
           f"mean={magicnorm_fine.mean():.3f}, max={magicnorm_fine.max():.3f}")
+    print(f"  magicnorm_coarse: min={magicnorm_coarse.min():.3f}, "
+          f"mean={magicnorm_coarse.mean():.3f}, max={magicnorm_coarse.max():.3f}")
     print(f"  magicnorm_ms:     min={magicnorm_ms.min():.3f}, "
           f"mean={magicnorm_ms.mean():.3f}, max={magicnorm_ms.max():.3f}")
     print(f"  pct>0.1: {(magicnorm_ms>0.1).mean()*100:.1f}%  "
@@ -220,12 +200,6 @@ def reactiv_multiscale(stack, dates, start, end, scales=(1, 20, 70),
 
     for c in range(3):
         rgb[c][no_data_mask] = 0.0
-
-    smooth_rgb = np.zeros_like(rgb)
-    for c in range(3):
-        smooth_rgb[c] = uniform_filter(rgb[c], size=3)
-        smooth_rgb[c][no_data_mask] = 0.0
-    rgb = smooth_rgb
 
     return rgb, no_data_mask, magicnorm_ms, amplitude_fine, stack.copy()
     
